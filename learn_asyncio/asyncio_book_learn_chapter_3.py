@@ -1,3 +1,5 @@
+"""Приложения из листингов 3 главы до 3.7 листинга"""
+
 import selectors
 import socket
 from selectors import SelectorKey # SelectorKey — это специальный объект питона, в котором хранится всё про проснувшийся сокет.
