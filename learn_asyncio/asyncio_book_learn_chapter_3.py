@@ -1,6 +1,7 @@
 import socket
 import asyncio
 import logging
+import signal # на Windows он не будет работать
 from asyncio import AbstractEventLoop #— это большой системный чертеж, в котором разработчики Python прописали: 
                                       # «Каким именно обязан быть и какие методы должен иметь любой Цикл Событий (Event Loop) в экосистеме Python».
 
@@ -20,15 +21,41 @@ async def echo(connection: socket, loop: AbstractEventLoop) -> None:
     finally:
         connection.close()
 
-
-task = []
+echo_tasks = []
 
 async def listen_for_connections(server_socket: socket, loop: AbstractEventLoop):
     while True:
         connection, address = await loop.sock_accept(server_socket) # ждем пока пользователь не подключится к нашему сокету
         connection.setblocking(False) # переводим клиентский сокет в неблокирующий
         print(f"Получен запрос на подключение от {address}")
-        task.append(asyncio.create_task(echo(connection, loop))) # переводим  всю прошлою конструкцию в фон чтобы дать пороботать другим клиентам
+        echo_task = asyncio.create_task(echo(connection, loop)) # переводим  всю прошлою конструкцию в фон чтобы дать пороботать другим клиентам
+        echo_tasks.append(echo_task)
+
+class GracefulExit(SystemExit):
+    # создаем свой класс с ошибкой чтобы нашу ошибку(которую мы будем планировать) случайно не забрал другой блок try/except(даем новое имя)
+    pass
+
+def shotdown():
+    """Функция add_signal_handler устроена так, что она принимает в качестве аргумента обычную (синхронную) функцию. 
+       Ты не можешь передать ей напрямую ключевое слово raise, 
+       потому что синтаксис Python не позволяет засунуть raise внутрь обычной переменной или сделать lambda: raise GracefulExit().
+       Поэтому мы создаем маленькую функцию-обертку shotdown(). 
+       Её единственная задача — лечь под танк: когда прилетит сигнал, она сработает и выбросит исключение GracefulExit наверх."""
+    raise GracefulExit()
+
+async def close_echo_tasks(echo_tasks: list[asyncio.Task]): # в аргументах echo_tasks который должен быть списком в котором будут наши задачи
+    waiters = [asyncio.wait_for(task, 2) for task in echo_tasks] # в переменную waiters попадает список с результатами работы цикла
+    """По другому это можно было бы написать так:
+        waiters = []
+        for task in echo_tasks:
+            wrapped_task = asyncio.wait_for(task, 2) # Сохраняем обертку с таймером
+            waiters.append(wrapped_task)             # Добавляем в список именно её"""
+    try:
+        for task in waiters:
+            await task # ждем завершения 
+    except asyncio.exceptions.TimeoutError:
+        # Здесь мы ожидаем истечение тайм-аута
+        pass
 
 async def main():
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -39,6 +66,15 @@ async def main():
     server_socket.bind(server_address) # присваиваем адрес 
     server_socket.listen()
 
-    await listen_for_connections(server_socket, asyncio.get_event_loop())
+    for signame in {'SIGINT', 'SIGTERM'}:
+        loop.add_signal_handler(getattr(signal, signame), shotdown)
+    await listen_for_connections(server_socket, loop)
 
-asyncio.run(main())
+loop = asyncio.new_event_loop()
+
+try:
+    loop.run_until_complete(main())
+except GracefulExit:
+    loop.run_until_complete(close_echo_tasks(echo_tasks))
+finally:
+    loop.close()
