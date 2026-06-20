@@ -1,3 +1,4 @@
+"""Не работает на Windows"""
 import socket
 import asyncio
 import logging
