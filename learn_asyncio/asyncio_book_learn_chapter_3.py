@@ -1,64 +1,44 @@
-import selectors
 import socket
-from selectors import SelectorKey # SelectorKey — это специальный объект питона, в котором хранится всё про проснувшийся сокет.
-from typing import List, Tuple
+import asyncio
+import logging
+from asyncio import AbstractEventLoop #— это большой системный чертеж, в котором разработчики Python прописали: 
+                                      # «Каким именно обязан быть и какие методы должен иметь любой Цикл Событий (Event Loop) в экосистеме Python».
 
-selector = selectors.DefaultSelector()
+async def echo(connection: socket, loop: AbstractEventLoop) -> None:
+    try:
+        while data := await loop.sock_recv(connection, 1024):
+            """Конструкция data := ... (walrus operator) позволяет одновременно сделать две вещи:
+               Выполнить команду справа и сохранить результат в переменную data.
+               Сразу же проверить, что лежит в этой переменной. Если там есть данные, while считает это как True и запускает цикл. 
+               Если там пустые байты (b''), while видит в этом False и цикл автоматически завершается."""
+            if data == b"boom":
+                raise Exception('Неожиданая ошибка сети')
+            await loop.sock_sendall(connection, data) # забираем данные из клинтского сокета и с помощью await не закрываем эту строчку, 
+                                                      # а замораживаем пока пользователь не нажмет Enter
+    except Exception as ex:
+        logging.exception(ex)
+    finally:
+        connection.close()
 
-server_socket = socket.socket()
-server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) 
-# метод setsockopt расшифровывается как: Установить опцию сокета
-# параметр SOL_SOCKET, говорит ОС: Эта настройка не касается сетивых протаколов, а самого базового уровня нашего сокета
-# параметр SO_REUSEADDR, просит ОС, повторно занять тот-же IP-адрес и порт
-# циферка 1, говорит включить эту настройку, будь там 0 она бы не включилась
 
-server_address = ('127.0.0.1', 8000)
-server_socket.setblocking(False) # переводим сокет в неблокирующий режим
-server_socket.bind(server_address) # привязываем адрес к нашемму сокету
-server_socket.listen() # слушаем запросы на адрес от клиентов
+task = []
 
-print("Сервер запущен и ждет подключения на порту 8000...")
+async def listen_for_connections(server_socket: socket, loop: AbstractEventLoop):
+    while True:
+        connection, address = await loop.sock_accept(server_socket) # ждем пока пользователь не подключится к нашему сокету
+        connection.setblocking(False) # переводим клиентский сокет в неблокирующий
+        print(f"Получен запрос на подключение от {address}")
+        task.append(asyncio.create_task(echo(connection, loop))) # переводим  всю прошлою конструкцию в фон чтобы дать пороботать другим клиентам
 
-selector.register(server_socket, selectors.EVENT_READ) # регистрируем главный сокет, параметр EVENT_READ говорит: Если кто-то подключится, 
-                                                       # это будет событие EVENT_READ (готово к чтению/приему), дай мне знать
-# _system_variable = None
-while True:
-    # if _syste_variable == True:
-    #     break
-    events: List[Tuple[SelectorKey, int]] = selector.select(timeout=1) # Если поставить timeout=1, ты говоришь селектору: «Жди данные. 
-                                                                       # Но если в течение ровно 1 секунды абсолютно ничего не произошло — 
-                                                                       # всё равно проснись, верни мне пустой список и дай коду идти дальше»
-    # обозначаем переменную events в которой будет что-то типа: [(SelectorKey, int), (SelectorKey, int)...], и выстовляем тайм-аут 1сек.
+async def main():
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    if len(events) == 0:
-        print("\rСобытий нет, подожду ещё...", end="", flush=True) # \r возвращает курсор в начало строки, 
-                                                                   # а end="" не дает переносить строку на новую, а flush=True, 
-                                                                   # принудительно заставляет Python мгновенно выплюнуть текст в консоль, 
-                                                                   # не придерживая его в своей внутренней памяти (буфере).
+    server_address = ('127.0.0.1', 8000)
+    server_socket.setblocking(False)
+    server_socket.bind(server_address) # присваиваем адрес 
+    server_socket.listen()
 
-    for event, _ in events:
-        # для регистрации мы передаем имя сокета и то что он будет делать и мы тут забираем это из списка
-        event_socket = event.fileobj # передаем в переменную ссылку на сокет который забрал event
-    
-        if event_socket == server_socket:
-            connection, address = server_socket.accept() # ждем запроса на подключение и этот метод: 
-                                                                    # 2. возвращяет объект подключения и
-                                                                    # адрес подключившегостя клиента;
-            connection.setblocking(False) # переводим сокет в неблокирующий режим
-            print(f"УРА! Подключение успешно: {address}")
-            selector.register(connection, selectors.EVENT_READ)
-        else:
-            data = event_socket.recv(1024)
-            
-            # 1. СРАЗУ проверяем, не отключился ли клиент
-            if not data:
-                print("\n[INFO] Клиент отключился. Начинаем уборку...")
-                selector.unregister(event_socket)  # Говорим селектору: "Больше не следи за ним"
-                event_socket.close()               
-                print("[INFO] Сокет успешно закрыт и удален из селектора.")
-                # _system_variable = True
-            
-            # 2. Если данные ЕСТЬ, то только тогда логируем и отправляем эхо
-            else:
-                print(f"Получены данные {data}")
-                event_socket.send(data)
+    await listen_for_connections(server_socket, asyncio.get_event_loop())
+
+asyncio.run(main())
